@@ -99,8 +99,9 @@ namespace DiscordQuoteBot
 
         static IServiceProvider CreateProvider()
         {
-            var config = new DiscordSocketConfig()
+            var config = new DiscordSocketConfig
             {
+                GatewayIntents = GatewayIntents.AllUnprivileged & ~GatewayIntents.GuildScheduledEvents & ~GatewayIntents.GuildInvites
             };
 
             var builder = new ConfigurationBuilder()
