@@ -1,22 +1,19 @@
 ﻿using Discord;
-using Discord.Commands;
-using Discord.Commands.Builders;
 using Discord.Interactions;
-using Discord.Net;
 using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json;
-using System;
-using System.ComponentModel.Design;
 using System.Reflection;
-using System.Windows.Input;
+using DiscordQuoteBot.Configuration;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace DiscordQuoteBot
 {
     internal class Program
     {
         private static DiscordSocketClient? _client;
-        private static ulong _testGuildId = 55333533735985152;
+        private static ulong _testGuildId = 268801812302135296;
         private static InteractionService? _interactionService;
         private static IServiceProvider? _serviceProvider;
         private static CommandHandler? _commandHandler;
@@ -34,9 +31,9 @@ namespace DiscordQuoteBot
 
             if (File.Exists(oldQuoteFile))
             {
-                Dictionary<ulong, List<Quote>> loadedData = JsonConvert.DeserializeObject< Dictionary<ulong, List<Quote>>>(File.ReadAllText(oldQuoteFile));
+                Dictionary<ulong, List<Quote>> loadedData = JsonConvert.DeserializeObject<Dictionary<ulong, List<Quote>>>(File.ReadAllText(oldQuoteFile));
 
-                foreach(var v in loadedData)
+                foreach (var v in loadedData)
                 {
                     var d = _data.GetDataForServer(v.Key);
                     foreach (var q in v.Value)
@@ -53,10 +50,10 @@ namespace DiscordQuoteBot
             _client.Ready += client_Ready;
 
 
-            var token = "";
+            string token;
             try
             {
-                token = File.ReadAllText("token.txt");
+                token = _serviceProvider.GetRequiredService<IOptions<DiscordBotConfiguration>>().Value.Token;
             }
             catch (Exception ex) when (
                 ex is IOException ||
@@ -98,22 +95,29 @@ namespace DiscordQuoteBot
                 var ctx = new SocketInteractionContext(_client, interaction);
                 await _interactionService.ExecuteCommandAsync(ctx, scope.ServiceProvider);
             };
-
-
         }
 
         static IServiceProvider CreateProvider()
         {
             var config = new DiscordSocketConfig()
             {
-                
             };
 
+            var builder = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                .AddUserSecrets<DiscordBotConfiguration>()
+                .AddEnvironmentVariables();
+
+            var configuration = builder.Build();
+
             var collection = new ServiceCollection()
-            .AddSingleton(config)
-            .AddSingleton<DiscordSocketClient>()
-            .AddSingleton<Data>()
-            .AddSingleton<CommandHandler>();
+                .Configure<DiscordBotConfiguration>(configuration.GetRequiredSection("DiscordBot"))
+                .AddOptions()
+                .AddSingleton(config)
+                .AddSingleton<DiscordSocketClient>()
+                .AddSingleton<Data>()
+                .AddSingleton<CommandHandler>();
 
             return collection.BuildServiceProvider();
         }
@@ -124,7 +128,7 @@ namespace DiscordQuoteBot
             return Task.CompletedTask;
         }
 
-        static bool IsDebug()
+        private static bool IsDebug()
         {
 #if DEBUG
             return true;
