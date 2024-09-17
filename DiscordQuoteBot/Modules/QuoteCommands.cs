@@ -2,155 +2,146 @@
 using Discord.Interactions;
 using Discord.WebSocket;
 using System.Text;
+using DiscordQuoteBot.Data;
 using DiscordQuoteBot.Models;
-using DiscordQuoteBot.Services;
 using JetBrains.Annotations;
+using Microsoft.EntityFrameworkCore;
 
 namespace DiscordQuoteBot.Modules
 {
     [PublicAPI]
     [Group("quote", "Commands relating to quotes")]
-    public class QuoteCommands : InteractionModuleBase<SocketInteractionContext>
+    public class QuoteCommands(QuoteBotDbContext db, DiscordSocketClient client)
+        : InteractionModuleBase<SocketInteractionContext>
     {
-        public ServerDataService? ServerDataService { get; set; }
-        public DiscordSocketClient? Client { get; set; }
-
         [SlashCommand("add", "Adds a quote")]
-        public async Task AddQuote(string quote)
+        public async Task AddQuote([MinLength(1)] string quote)
         {
-            var list = ServerDataService!.GetDataForServer(Context.Guild.Id).QuoteList;
-            list.Add(
-                new Quote()
-                {
-                    AddedBy = Context.User.Id,
-                    QuoteText = quote
-                });
-            ServerDataService.SaveData();
-            await RespondAsync($"Added quote #{list.Count} `{quote}`");
+            var newQuote = db.Quotes.Add(new Quote()
+            {
+                AuthorId = Context.User.Id,
+                GuildId = Context.Guild.Id,
+                QuoteText = quote
+            });
+            await db.SaveChangesAsync();
+
+            await RespondAsync($"Added quote #{newQuote.Entity.Id} `{quote}`");
         }
 
         [SlashCommand("info", "Provides quote information")]
-        public async Task Info(int quoteNum = 0)
+        public async Task Info([MinValue(1)] int quoteId = 0)
         {
-            var list = ServerDataService!.GetDataForServer(Context.Guild.Id).QuoteList;
-            if (quoteNum == 0)
+            if (quoteId is 0)
             {
+                var quoteCount = await db.Quotes.CountAsync();
                 //General information
-                await RespondAsync($"{list.Count} quotes in database", ephemeral: true);
+                await RespondAsync($"{quoteCount} quotes in database", ephemeral: true);
+                return;
             }
-            else
+
+            var quote = await db.Quotes.FindAsync(quoteId);
+
+            if (quote is null)
             {
-                quoteNum--;
-                if(quoteNum < 0 || quoteNum > list.Count)
-                {
-                    await RespondAsync($"Quote Number should be between 1 and {list.Count}", ephemeral: true);
-                    return;
-                }
-                var adder = await Client!.GetUserAsync(list[quoteNum].AddedBy);
-                await RespondAsync(
-                    $"**Quote Number {quoteNum+1}**\n" +
-                    $"Added by {adder.Mention}\n" + 
-                    $"On {list[quoteNum].TimeAdded}",
-                    ephemeral: true);
+                await RespondAsync($"Quote with ID {quoteId} could not be found.", ephemeral: true);
+                return;
+            }
+
+            try
+            {
+                var quoteAuthor = await Context.Client.GetUserAsync(quote.AuthorId);
+                var responseMessage = $"**Quote Number {quote.Id}**\n";
+                responseMessage += quoteAuthor is null
+                    ? $"Added on {quote.TimeAdded}"
+                    : $"Added by {quoteAuthor.Mention}\n" +
+                      $"On {quote.TimeAdded}";
+                await RespondAsync(responseMessage, ephemeral: true);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
             }
         }
+
         [SlashCommand("list", "Lists up to 10 quotes per page")]
-        public async Task List(int pageNum = 1)
+        public async Task List([MinValue(1)] int pageNumber = 1)
         {
-            pageNum--;
-            var sb = CreateQuoteList(Context.Guild.Id, pageNum);
+            var quoteCount = await db.Quotes.CountAsync();
+            var maxPage = quoteCount / 10 + 1;
+            pageNumber = Math.Min(pageNumber, maxPage);
+            var pageIndex = pageNumber - 1;
+            var pageQuoteIndex = pageIndex * 10;
 
-            if (BuildCompsForListPage(Context.Guild.Id, pageNum, out var builder))
-            {
-                await RespondAsync(sb.ToString(), ephemeral: true, components: builder.Build());
-            }
-            else
-            {
-                await RespondAsync(sb.ToString(), ephemeral: true);
-            }
-            Client!.ButtonExecuted += Client_ButtonExecuted;
+            var sb = await CreateQuoteList(Context.Guild.Id, pageNumber, pageQuoteIndex, maxPage);
+            var builder = new ComponentBuilder();
+            BuildCompsForListPage(Context.Guild.Id, pageIndex, maxPage, builder);
+            await RespondAsync(sb.ToString(), ephemeral: true, components: builder.Build());
+
+            client.ButtonExecuted += Client_ButtonExecuted;
         }
 
-        private bool BuildCompsForListPage(ulong? guildId, int pageNum, out ComponentBuilder builder)
+        private static void BuildCompsForListPage(ulong? guildId, int pageIndex, int maxPage, ComponentBuilder builder)
         {
-            builder = new ComponentBuilder();
-            var doButtons = false;
-            
-            var list = ServerDataService!.GetDataForServer(Context.Guild.Id).QuoteList;
-            var maxPage = list.Count / 10;
-
-            if (pageNum != 0)
+            if (pageIndex > 0)
             {
-                builder = builder.WithButton("Previous", $"quote-list-button-{pageNum - 1}");
-                doButtons = true;
-            }
-            if (pageNum < maxPage)
-            {
-                builder = builder.WithButton("Next", $"quote-list-button-{pageNum + 1}");
-                doButtons = true;
+                builder = builder.WithButton("Previous", $"quote-list-button-{pageIndex - 1}");
             }
 
-            return doButtons;
+            if (pageIndex + 1 >= maxPage) return;
+
+            builder.WithButton("Next", $"quote-list-button-{pageIndex + 1}");
         }
-        private StringBuilder CreateQuoteList(ulong? guildId, int pageNum)
-        {
-            var list = ServerDataService!.GetDataForServer(Context.Guild.Id).QuoteList;
-            var maxPage = list.Count / 10;
 
+        private async Task<StringBuilder> CreateQuoteList(ulong? guildId, int pageNumber, int pageQuoteIndex, int maxPage)
+        {
             var sb = new StringBuilder();
 
-            sb.AppendLine($"Quote page {pageNum + 1} of {maxPage + 1}");
-            var remaining = list.Count - (pageNum * 10);
+            sb.AppendLine($"Quote page {pageNumber} of {maxPage}");
 
-            for (var i = 0; i < Math.Min(10, remaining); i++)
+            var quotes = await db.Quotes.OrderBy(quote => quote.Id).Skip(pageQuoteIndex).Take(10).ToListAsync();
+            foreach (var quote in quotes)
             {
-                var quoteNum = pageNum * 10 + i;
-                sb.AppendLine($"{quoteNum + 1}: `{list[quoteNum].QuoteText}`");
+                sb.AppendLine($"{quote.Id}: `{quote.QuoteText}`");
             }
 
             return sb;
         }
 
-        private Task Client_ButtonExecuted(SocketMessageComponent component)
+        private async Task Client_ButtonExecuted(SocketMessageComponent component)
         {
-            if (!component.Data.CustomId.StartsWith("quote-list-button-")) return Task.CompletedTask;
-            var pageToLoad = int.Parse(component.Data.CustomId.Substring(component.Data.CustomId.LastIndexOf('-') + 1));
-            if (BuildCompsForListPage(component.GuildId, pageToLoad, out var builder))
+            if (!component.Data.CustomId.StartsWith("quote-list-button-")) return;
+
+            var quoteCount = await db.Quotes.CountAsync();
+            var maxPage = quoteCount / 10 + 1;
+            var pageToLoad = int.Parse(component.Data.CustomId[(component.Data.CustomId.LastIndexOf('-') + 1)..]);
+            var pageIndex = pageToLoad - 1;
+            var pageQuoteIndex = pageIndex * 10;
+
+            var builder = new ComponentBuilder();
+            BuildCompsForListPage(component.GuildId, pageToLoad, maxPage, builder);
+            await component.UpdateAsync(comp =>
             {
-                component.UpdateAsync(comp =>
-                {
-                    comp.Content = CreateQuoteList(component.GuildId, pageToLoad).ToString();
-                    comp.Components = builder.Build();
-                });
-            }
-            else {
-                component.UpdateAsync(comp =>
-                {
-                    comp.Content = CreateQuoteList(component.GuildId, pageToLoad).ToString();
-                });
-            }
-            return Task.CompletedTask;
+                comp.Content = CreateQuoteList(component.GuildId, pageToLoad, pageQuoteIndex, maxPage).ToString();
+                comp.Components = builder.Build();
+            });
         }
 
         [SlashCommand("say", "Says a quote with optional ID")]
-        public async Task SayQuote(int quoteNum = 0)
+        public async Task SayQuote([MinValue(1)] int quoteId = 0)
         {
-            var list = ServerDataService!.GetDataForServer(Context.Guild.Id).QuoteList;
-            if(quoteNum > list.Count)
+            if (quoteId is 0)
             {
-                await RespondAsync($"Number too high - max quote number is {list.Count}", ephemeral: true);
-                return;
-            }
-            if(quoteNum == 0)
-            {
-                quoteNum = new Random().Next(list.Count);
-            }
-            else
-            {
-                quoteNum--;
+                quoteId = new Random().Next(1, await db.Quotes.CountAsync() + 1);
             }
 
-            await RespondAsync($"{quoteNum + 1}: `{list[quoteNum].QuoteText}`");
+            var quote = await db.Quotes.FindAsync(quoteId);
+            if (quote is null)
+            {
+                await RespondAsync($"Could not find quote with ID: {quoteId}", ephemeral: true);
+                return;
+            }
+
+            await RespondAsync($"#{quote.Id}: `{quote.QuoteText}`");
         }
     }
 }
